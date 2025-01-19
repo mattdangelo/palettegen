@@ -15,13 +15,12 @@ services:
     depends_on:
       - postgres
       - redis
+      - image-clusterer
 
-#  engine:
-#    build:
-#      context: .
-#      dockerfile: Dockerfile.engine
-#    ports:
-#      - "8080:8080"
+  image-clusterer:
+    build:
+      context: .
+      dockerfile: Dockerfile.image-clusterer
 
   postgres:
     image: postgres:15

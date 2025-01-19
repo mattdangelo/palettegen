@@ -15,15 +15,19 @@
 #include "centroid_average.h"
 #include <unordered_set>
 
-#define DEBUG
+void debug_log(const std::string& message) {
+#ifdef DEBUG
+    std::cout << message << std::endl;
+#endif
+}
 
 enum colour { blue = 0, green = 1, red = 2 };
 
-constexpr int MAX_ITT = 1000;		    // Iteration limit (Default 1000);
-constexpr float CONV_THRESH = 0.0001;		// Convergence threshold (Default 0.01);
+constexpr int MAX_ITT = 1000;		    // Default iteration limit
+constexpr float CONV_THRESH = 0.0001;	// Default convergence threshold
 
 inline bool converged(cv::Vec3f& convergence_errors, std::vector<cv::Vec3f>& centroids, std::vector<cv::Vec3f>& old_centroids) {
-	for (int i = 0; i < centroids.size(); i++) {
+	for (int i=0;i<centroids.size();i++) {
 		convergence_errors[blue] = abs(centroids[i][blue] - old_centroids[i][blue]);
 		convergence_errors[green] = abs(centroids[i][green] - old_centroids[i][green]);
 		convergence_errors[red] = abs(centroids[i][red] - old_centroids[i][red]);
@@ -50,7 +54,7 @@ void initialize_centroids(std::vector<cv::Vec3f>& centroids, cv::Mat& image) {
 	std::unordered_set <std::pair<unsigned int, unsigned int>, pair_hash> initial_centroids;
 
 	// Random selection of unique initial centroids
-	for (int i = 0; i < centroid_count; i++) {
+	for (int i=0;i<centroid_count;i++) {
 		int x = rand() % s.height;
 		int y = rand() % s.width;
 
@@ -75,34 +79,34 @@ std::vector<cv::Vec3f> kmeans(cv::Mat& image, uint8_t centroid_count) {
 	initialize_centroids(centroids, image);
 
 	std::vector<centroid_average> centroid_averages(centroid_count);
-	for (int i = 0; i < centroid_count; i++) {
+	for (int i=0;i<centroid_count;i++) {
 		centroid_averages[i] = { 0, 0, 0 ,0 };
 	}
 
 	// Main k-means loop
-	int i = 0;
+	int itt = 0;
 	do {
 		// Save a copy of the centroids before we modify them
 		std::vector<cv::Vec3f> old_centroids(centroid_count);
-		for (int j = 0; j < centroid_averages.size(); j++) {
+		for (int j=0;j<centroid_averages.size();j++) {
 			old_centroids[j][blue] = centroids[j][blue]; 
 			old_centroids[j][green] = centroids[j][green]; 
 			old_centroids[j][red] = centroids[j][red];
 		};
 
 		// Reset averages
-		for (int i = 0; i < centroids.size();i++) {
+		for (int i=0;i<centroids.size();i++) {
 			centroid_averages[i] = { 0, 0, 0, 0 };
 		}
 
- 		for (int j = 0; j < s.width; j++) {
-			for (int k = 0; k < s.height; k++) {
+ 		for (int j=0;j<s.width;j++) {
+			for (int k=0;k<s.height;k++) {
 				float current_min = FLT_MAX;
 				cv::Vec3b pixel = image.at<cv::Vec3b>(k, j);
 
 				int closest_centroid_idx = 0;
 				// For each pixel, point the corresponding centroid map entry to the nearest centroid
-				for (int i = 0; i < centroid_count; i++) {
+				for (int i=0;i<centroid_count;i++) {
 					float dist = abs(static_cast<float>(pixel[blue]) - centroids[i][blue]) +
 								 abs(static_cast<float>(pixel[green]) - centroids[i][green]) +
 								 abs(static_cast<float>(pixel[red]) - centroids[i][red]);
@@ -122,7 +126,7 @@ std::vector<cv::Vec3f> kmeans(cv::Mat& image, uint8_t centroid_count) {
 		}
 
 		// Update centroid locations
-		for (int i = 0; i < centroids.size();i++) {
+		for (int i=0;i<centroids.size();i++) {
 			if (centroid_averages[i].total != 0) {
 				centroids[i][blue] = static_cast<float>(centroid_averages[i].blue) / centroid_averages[i].total;
 				centroids[i][green] = static_cast<float>(centroid_averages[i].green) / centroid_averages[i].total;
@@ -137,7 +141,7 @@ std::vector<cv::Vec3f> kmeans(cv::Mat& image, uint8_t centroid_count) {
 		}
 
 #ifdef DEBUG
-		std::cout << "=== Iteration: " << i << " ===\n";
+		std::cout << "=== Iteration: " << itt << " ===\n";
 		for (cv::Vec3f c : centroids) {
 			std::cout << " (B,G,R)" << c[blue] << ", " << c[green] << ", " << c[red] << "\n";
 		}
@@ -149,8 +153,8 @@ std::vector<cv::Vec3f> kmeans(cv::Mat& image, uint8_t centroid_count) {
 			"=======================\n";
 #endif
 
-		i++;
-	} while (i < MAX_ITT);
+		itt++;
+	} while (itt < MAX_ITT);
 
 	return centroids;
 }
