@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <unordered_map>
 
+#include <ruby.h>
 #include <opencv2/opencv.hpp>
 
 #include "coord.h"	
@@ -182,29 +183,27 @@ uint8_t centroid_count(const char* centroids_arg) {
 	return num_of_centroids;
 }
 
-int main(int argc, char* argv[]) {
-	if (argc < 3) {
-		std::cout << "Missing required image name and palette count\n";
-		std::cout << "eg: ./imgseg apple.png 6\n";
-		exit(1);
-	}
+VALUE image_clusterer(VALUE self, VALUE filename, VALUE count) {
+    Check_Type(filename, T_STRING);
+    Check_Type(count, T_FIXNUM);
 
-#ifdef DEBUG
-		std::cout << "Loading image into memory: " << argv[1] << "\n";
-#endif
+    const char* file = StringValueCStr(filename);
+    int cluster_count = NUM2INT(count);
 
-	auto im = im_to_mat(argv[1]);
-	auto result_set = kmeans(im, centroid_count(argv[2]));
+    cv::Mat image = im_to_mat(file);
+    auto result_set = kmeans(image, cluster_count);
 
-	std::sort(result_set.begin(), result_set.end(), [](const cv::Vec3f& lhs, const cv::Vec3f& rhs) {
-		// TODO: Not this - step sorting
-		return lhs[red] < rhs[red];
-	});
+    VALUE color_array = rb_ary_new();  // Create a new Ruby array
+    for (const auto& color : result_set) {
+        VALUE color_rgb = rb_ary_new3(3, INT2NUM((int)color[0]), INT2NUM((int)color[1]), INT2NUM((int)color[2]));
+        rb_ary_push(color_array, color_rgb);  // Push each color as a sub-array
+    }
 
-	for (cv::Vec3f v : result_set) {
-	//	std::cout << "#" << std::hex << (v[red] << 16 | v[green] << 8 | v[blue]) << "\n";
-		std::cout << "#" << v[red] << " " << v[green] <<  " " << v[blue] << "\n";
-	}
+    return color_array;
+}
 
-	return 0;
+extern "C" {
+    void Init_image_clusterer() {
+        rb_define_method(rb_cObject, "image_clusterer", (VALUE (*)(...))image_clusterer, 2);
+    }
 }

@@ -3,26 +3,39 @@ version: '3.8'
 services:
   server:
     build:
-      context: .
-      dockerfile: Dockerfile.server
+      context: server
+      dockerfile: Dockerfile
     volumes:
       - ./server:/app
     ports:
       - "3000:3000"
     environment:
-      - DATABASE_URL=postgres://postgres:password@postgres:5432/my_database
-      - REDIS_URL=redis://redis:6379/0
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=5432
     depends_on:
-      - postgres
-      - redis
-      - image-clusterer
+      db:
+        condition: service_healthy
+      # TODO: Implement proper healthchecks for these
+      redis:
+        condition: service_healthy
+      image-clusterer:
+        condition: service_healthy
+    restart: always
+    entrypoint: [ "bash", "-c", "until pg_isready -h db -p 5432; do echo waiting for db; sleep 2; done; bundle install && rails server -b 0.0.0.0" ]
+    command: bash -c "bundle install && rails db:setup && rails server -b 0.0.0.0"
+    networks:
+      - palette-net
 
   image-clusterer:
     build:
-      context: .
-      dockerfile: Dockerfile.image-clusterer
+      context: image-clusterer
+      dockerfile: Dockerfile
+    healthcheck:
+      test: [ "CMD-SHELL", "true" ]
 
-  postgres:
+  db:
     image: postgres:15
     environment:
       POSTGRES_USER: postgres
@@ -30,13 +43,29 @@ services:
       POSTGRES_DB: my_database
     ports:
       - "5432:5432"
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    restart: always
+    networks:
+      - palette-net
 
   redis:
     image: redis:7
     ports:
       - "6379:6379"
+    healthcheck:
+      test: [ "CMD-SHELL", "true" ]
+    networks:
+      - palette-net
 
 volumes:
   postgres_data:
+
+networks:
+  palette-net:
+    driver: bridge

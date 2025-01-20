@@ -1,14 +1,28 @@
-﻿# CMakeList.txt : CMake project for CMakeProject1, include source and define
-# project specific logic here.
+﻿cmake_minimum_required (VERSION 3.25.1)
 
-cmake_minimum_required (VERSION 3.31)
+project (image-clusterer)
 
-project ("image-clusterer")
+# Find OpenCV
+find_package(OpenCV REQUIRED)
+include_directories(${OpenCV_INCLUDE_DIRS})
 
-find_package( OpenCV REQUIRED )
-include_directories( ${OpenCV_INCLUDE_DIRS} )
+# Get Ruby include and library paths
+execute_process(COMMAND ruby -rrbconfig -e "print RbConfig::CONFIG['rubyhdrdir']"
+                OUTPUT_VARIABLE RUBY_INCLUDE_DIR)
+execute_process(COMMAND ruby -rrbconfig -e "print RbConfig::CONFIG['rubyarchhdrdir']"
+                OUTPUT_VARIABLE RUBY_ARCH_INCLUDE_DIR)
 
-# Add source to this project's executable.
-add_executable( image-clusterer image-clusterer.cpp  "pair_hash.h")
+include_directories(${RUBY_INCLUDE_DIR} ${RUBY_ARCH_INCLUDE_DIR})
 
-target_link_libraries( image-clusterer ${OpenCV_LIBS} )
+execute_process(COMMAND ruby -rrbconfig -e "print RbConfig::CONFIG['libdir']"
+                OUTPUT_VARIABLE RUBY_LIB_DIR)
+link_directories(${RUBY_LIB_DIR})
+
+# Define the shared library
+add_library(image_clusterer SHARED image-clusterer.cpp)
+
+# Link OpenCV and Ruby libraries
+target_link_libraries(image_clusterer ${OpenCV_LIBS} ruby)
+
+# Set the properties of the shared library
+set_target_properties(image_clusterer PROPERTIES PREFIX "" SUFFIX ".so")
