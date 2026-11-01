@@ -68,17 +68,23 @@ jobs:
       - name: Reduce ASLR entropy for ASan
         run: sudo sysctl -w vm.mmap_rnd_bits=28
 
-      # shift-base is off because stb_image_write's JPEG encoder left-shifts
-      # negative values; harmless, and it only encodes our own palette strips.
+      # Two UBSan checks are off, both for harmless patterns in the vendored stb code:
+      #   shift-base:        stb_image_write's JPEG encoder left-shifts negative values
+      #                      (and it only ever encodes our own palette strips).
+      #   nonnull-attribute: stb_image calls memcpy(NULL, src, 0) when a PNG's first
+      #                      IDAT chunk is empty; zero bytes are copied.
       - name: Build fuzzer
         run: >
           clang++ -std=c++17 -g -O1
-          -fsanitize=fuzzer,address,undefined -fno-sanitize=shift-base -fno-sanitize-recover=undefined
+          -fsanitize=fuzzer,address,undefined -fno-sanitize=shift-base,nonnull-attribute
+          -fno-sanitize-recover=undefined
           -Iext/palettegen -Iext/palettegen/vendor
           fuzz/fuzz_decode.cpp ext/palettegen/image_io.cpp ext/palettegen/kmeans.cpp
           -o fuzz_decode
 
       - name: Fuzz for 3 minutes
+        env:
+          UBSAN_OPTIONS: print_stacktrace=1
         run: |
           mkdir -p corpus
           cp test/fixtures/* corpus/
