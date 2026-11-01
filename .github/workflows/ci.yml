@@ -84,7 +84,11 @@ jobs:
         # can't find the real __cxa_throw to intercept when the extension throws.
         run: |
           export LD_PRELOAD="$(gcc -print-file-name=libasan.so) $(gcc -print-file-name=libstdc++.so)"
-          # The threaded tests are excluded: ASan aborts ("Failed to munmap") when Ruby
-          # tears down thread stacks. They run in the normal test jobs.
-          bundle exec ruby -Ilib -Itest test/test_palettegen.rb --verbose \
-            --exclude "/test_thread_safety|test_long_extraction_can_be_interrupted/"
+          # ASan aborts with "Failed to munmap" during Ruby's own VM teardown (after
+          # every test has passed), so exit straight after the run with exit!.
+          bundle exec ruby -Ilib -Itest -e '
+            require "./test/test_palettegen"
+            ok = Minitest.run(ARGV)
+            $stdout.flush
+            exit!(ok ? 0 : 1)
+          ' -- --verbose
