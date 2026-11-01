@@ -14,6 +14,12 @@ Gem::Specification.new do |spec|
     No ImageMagick/OpenCV required.
   DESC
   spec.license = "MIT"
+  spec.homepage = "https://github.com/mattdangelo/palettegen"
+  spec.metadata = {
+    "source_code_uri" => spec.homepage,
+    "bug_tracker_uri" => "#{spec.homepage}/issues",
+    "rubygems_mfa_required" => "true"
+  }
   spec.required_ruby_version = ">= 3.0"
 
   spec.files = Dir[
