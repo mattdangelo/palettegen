@@ -219,35 +219,70 @@ void check_cancel(const Options& opts) {
     if (opts.cancel && opts.cancel->load(std::memory_order_relaxed)) throw Cancelled("cancelled");
 }
 
+// Lloyd's algorithm with Hamerly's bounds (G. Hamerly, "Making k-means even
+// faster", SDM 2010). Each point keeps an upper bound on the distance to its
+// assigned centroid and a lower bound on the distance to every other centroid.
+// When upper < lower, no other centroid can be closer, so the k distance
+// computations are skipped. After the first couple of iterations most points
+// are skipped.
+//
+// The skip is only taken when the assigned centroid is *strictly* closer than
+// all others (with a small slack for rounding in the bounds). In that case
+// plain Lloyd would pick the same centroid, so assignments are identical to an
+// exhaustive scan. Points that aren't skipped are scanned exactly as before
+// (squared distances, lowest index wins ties). Sums, weights and inertia are
+// still computed in point order from those assignments, so the output is
+// bit-for-bit the same as the exhaustive version.
 Clustering lloyd(const std::vector<Point>& pts, std::vector<Vec3> centroids, int max_iterations,
                  const Options& opts) {
+    const std::size_t n = pts.size();
     const std::size_t k = centroids.size();
-    std::vector<int> assign(pts.size(), -1);
-    std::vector<double> d2(pts.size(), 0.0);
+    std::vector<int> assign(n, -1);
+    // Bounds are Euclidean (not squared) distances, so the triangle inequality
+    // applies when centroids move.
+    std::vector<double> upper(n, 0.0);
+    std::vector<double> lower(n, 0.0);  // 0 forces a full scan.
+    std::vector<double> shift(k, 0.0);
     constexpr double kShiftTolerance = 1e-6;  // squared distance, working-space units
+
+    // Allowance for rounding in the bounds: they come from sqrt and repeated
+    // add/subtract, so they can be off by a few ulps. Working-space distances
+    // are at most a few hundred, so this is many orders of magnitude larger
+    // than the error and many orders smaller than any real distance gap.
+    auto slack = [](double u) { return 1e-9 * (1.0 + u); };
 
     Clustering result;
     for (int iter = 0;; ++iter) {
         check_cancel(opts);
         // Assignment step.
         bool changed = false;
-        double inertia = 0.0;
-        for (std::size_t i = 0; i < pts.size(); ++i) {
+        for (std::size_t i = 0; i < n; ++i) {
+            const Vec3& p = pts[i].v;
+            if (assign[i] >= 0) {
+                if (upper[i] + slack(upper[i]) < lower[i]) continue;
+                // Tighten the upper bound and try again before a full scan.
+                upper[i] = std::sqrt(dist2(p, centroids[static_cast<std::size_t>(assign[i])]));
+                if (upper[i] + slack(upper[i]) < lower[i]) continue;
+            }
             int best = 0;
-            double best_d = dist2(pts[i].v, centroids[0]);
+            double best_d = dist2(p, centroids[0]);
+            double second_d = std::numeric_limits<double>::max();
             for (std::size_t c = 1; c < k; ++c) {
-                const double d = dist2(pts[i].v, centroids[c]);
+                const double d = dist2(p, centroids[c]);
                 if (d < best_d) {
+                    second_d = best_d;
                     best_d = d;
                     best = static_cast<int>(c);
+                } else if (d < second_d) {
+                    second_d = d;
                 }
             }
             if (assign[i] != best) {
                 assign[i] = best;
                 changed = true;
             }
-            d2[i] = best_d;
-            inertia += pts[i].weight * best_d;
+            upper[i] = std::sqrt(best_d);
+            lower[i] = std::sqrt(second_d);
         }
 
         // Accumulate in double: no overflow regardless of image size.
@@ -260,14 +295,31 @@ Clustering lloyd(const std::vector<Point>& pts, std::vector<Vec3> centroids, int
         }
 
         if (!changed || iter >= max_iterations) {
+            // Skipped points have no exact distance, so compute inertia here
+            // (same values, same order as summing during the assignment pass).
+            double inertia = 0.0;
+            for (std::size_t i = 0; i < n; ++i) {
+                inertia += pts[i].weight * dist2(pts[i].v, centroids[static_cast<std::size_t>(assign[i])]);
+            }
             result.centroids = centroids;
             result.weights = weights;
             result.inertia = inertia;
             return result;
         }
 
+        // Exact squared distance from each point to its centroid, needed only
+        // to re-seed empty clusters (rare). Computed before any centroid moves.
+        std::vector<double> d2;
+        if (std::find(weights.begin(), weights.end(), 0.0) != weights.end()) {
+            d2.resize(n);
+            for (std::size_t i = 0; i < n; ++i) {
+                d2[i] = dist2(pts[i].v, centroids[static_cast<std::size_t>(assign[i])]);
+            }
+        }
+
         // Update step.
         double max_shift = 0.0;
+        bool reseeded = false;
         for (std::size_t c = 0; c < k; ++c) {
             Vec3 next;
             if (weights[c] > 0.0) {
@@ -277,7 +329,7 @@ Clustering lloyd(const std::vector<Point>& pts, std::vector<Vec3> centroids, int
                 // leaving a dead centroid behind (old code produced duplicate swatches).
                 std::size_t worst = 0;
                 double worst_score = -1.0;
-                for (std::size_t i = 0; i < pts.size(); ++i) {
+                for (std::size_t i = 0; i < n; ++i) {
                     const double s = pts[i].weight * d2[i];
                     if (s > worst_score) {
                         worst_score = s;
@@ -287,9 +339,34 @@ Clustering lloyd(const std::vector<Point>& pts, std::vector<Vec3> centroids, int
                 next = pts[worst].v;
                 d2[worst] = 0.0;
                 max_shift = std::numeric_limits<double>::max();
+                reseeded = true;
             }
-            max_shift = std::max(max_shift, dist2(next, centroids[c]));
+            const double moved = dist2(next, centroids[c]);
+            max_shift = std::max(max_shift, moved);
+            shift[c] = std::sqrt(moved);
             centroids[c] = next;
+        }
+
+        // Keep the bounds valid for the moved centroids (triangle inequality):
+        // the assigned centroid got at most shift[a] further away, and every
+        // other centroid at most the largest shift among the others closer.
+        if (reseeded) {
+            // A centroid jumped across the space; just rescan everything.
+            std::fill(lower.begin(), lower.end(), 0.0);
+        } else {
+            std::size_t top = 0;
+            for (std::size_t c = 1; c < k; ++c) {
+                if (shift[c] > shift[top]) top = c;
+            }
+            double second = 0.0;
+            for (std::size_t c = 0; c < k; ++c) {
+                if (c != top) second = std::max(second, shift[c]);
+            }
+            for (std::size_t i = 0; i < n; ++i) {
+                const auto a = static_cast<std::size_t>(assign[i]);
+                upper[i] += shift[a];
+                lower[i] -= a == top ? second : shift[top];
+            }
         }
 
         // Centroids have stopped moving: do one more assignment pass (so the
