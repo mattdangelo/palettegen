@@ -11,18 +11,6 @@ else
   $CXXFLAGS << " -std=c++17 -O2"
 end
 
-# CI only: build with AddressSanitizer + UBSan to catch memory errors in the
-# decoders (run Ruby with LD_PRELOAD=$(gcc -print-file-name=libasan.so)).
-if ENV["PALETTEGEN_SANITIZE"] == "1"
-  # shift-base is off because stb_image_write's JPEG encoder left-shifts negative
-  # values (stb_image_write.h, stbiw__jpg_writeBits). Harmless on every real
-  # compiler, and it only ever encodes our own palette strips.
-  $CXXFLAGS << " -fsanitize=address,undefined -fno-sanitize=shift-base -fno-omit-frame-pointer" \
-               " -fno-sanitize-recover=undefined -g -O1"
-  $LDFLAGS << " -fsanitize=address,undefined"
-  message "palettegen: building with AddressSanitizer and UBSan\n"
-end
-
 have_func("rb_ext_ractor_safe", "ruby.h")
 
 # Optional WebP support. Opt out with: gem install palettegen -- --without-webp

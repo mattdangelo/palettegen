@@ -55,42 +55,42 @@ jobs:
             puts "palettegen #{Palettegen::VERSION}: #{hex.inspect}, webp=#{Palettegen.webp_supported?}"
           ' "$GITHUB_WORKSPACE/test/fixtures/green.png"
 
-  sanitize:
-    name: AddressSanitizer + UBSan fuzz
+  # Coverage-guided fuzzing of the C++ decoder + clustering core with libFuzzer,
+  # AddressSanitizer and UBSan. Runs without Ruby, which doesn't get on with ASan.
+  fuzz:
+    name: Fuzz (libFuzzer + ASan + UBSan)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: "3.4"
-          bundler-cache: true
-
-      - name: Compile with sanitizers
-        run: PALETTEGEN_SANITIZE=1 bundle exec rake compile
 
       # ASan's shadow memory layout breaks with the 32-bit mmap randomisation
       # used by recent Ubuntu runner kernels.
       - name: Reduce ASLR entropy for ASan
         run: sudo sysctl -w vm.mmap_rnd_bits=28
 
-      - name: Test (with 5000 fuzz iterations)
-        env:
-          # Ruby manages its own thread stacks, which ASan's fake stacks don't cope with.
-          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1:detect_stack_use_after_return=0
-          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
-          PALETTEGEN_FUZZ_ITERATIONS: "5000"
-        # libstdc++ is preloaded too: Ruby isn't a C++ program, so otherwise ASan
-        # can't find the real __cxa_throw to intercept when the extension throws.
+      # shift-base is off because stb_image_write's JPEG encoder left-shifts
+      # negative values; harmless, and it only encodes our own palette strips.
+      - name: Build fuzzer
+        run: >
+          clang++ -std=c++17 -g -O1
+          -fsanitize=fuzzer,address,undefined -fno-sanitize=shift-base -fno-sanitize-recover=undefined
+          -Iext/palettegen -Iext/palettegen/vendor
+          fuzz/fuzz_decode.cpp ext/palettegen/image_io.cpp ext/palettegen/kmeans.cpp
+          -o fuzz_decode
+
+      - name: Fuzz for 3 minutes
         run: |
-          export LD_PRELOAD="$(gcc -print-file-name=libasan.so) $(gcc -print-file-name=libstdc++.so)"
-          # ASan aborts with "Failed to munmap" whenever a Ruby thread exits (Ruby
-          # frees thread stacks in a way ASan can't follow). So: skip the test that
-          # spawns and joins threads (it runs in the normal jobs), and exit! straight
-          # after the run so Timeout's background thread isn't torn down either.
-          bundle exec ruby -Ilib -Itest -e '
-            require "./test/test_palettegen"
-            ok = Minitest.run(ARGV)
-            $stdout.flush
-            exit!(ok ? 0 : 1)
-          ' -- --verbose --exclude test_thread_safety
+          mkdir -p corpus
+          cp test/fixtures/* corpus/
+          ./fuzz_decode -max_total_time=180 -max_len=65536 -print_final_stats=1 corpus
+
+      - name: Upload crashing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash
+          path: |
+            crash-*
+            leak-*
+            timeout-*
+            oom-*
