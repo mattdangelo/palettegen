@@ -1,0 +1,56 @@
+name: Release
+
+# Push a tag like v0.2.0 (matching lib/palettegen/version.rb) to build the gem
+# and publish it as a GitHub Release with auto-generated notes.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      - name: Install libwebp
+        run: sudo apt-get update && sudo apt-get install -y libwebp-dev
+
+      - name: Check tag matches gem version
+        run: |
+          version=$(ruby -r ./lib/palettegen/version -e 'print Palettegen::VERSION')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Palettegen::VERSION ($version). Bump lib/palettegen/version.rb first."
+            exit 1
+          fi
+
+      - name: Build
+        run: bin/build
+
+      - name: Test
+        run: bundle exec rake test
+
+      - name: Install packaged gem and smoke test
+        run: |
+          gem install --local pkg/palettegen-*.gem
+          cd "$RUNNER_TEMP"
+          ruby -e '
+            require "palettegen"
+            hex = Palettegen.hex(ARGV[0], colors: 3)
+            abort "unexpected palette #{hex.inspect}" unless hex == ["#00ff00"]
+            puts "palettegen #{Palettegen::VERSION}: #{hex.inspect}"
+          ' "$GITHUB_WORKSPACE/test/fixtures/green.png"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: pkg/palettegen-*.gem
+          generate_release_notes: true
