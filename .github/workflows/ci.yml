@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Ruby ${{ matrix.ruby }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        ruby: ["3.0", "3.4", "4.0"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+
+      - name: Install libwebp (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebp-dev
+
+      # Run the documented build scripts exactly as a developer would.
+      - name: Build (bin/build)
+        if: runner.os != 'Windows'
+        run: bin/build
+      - name: Build (bin/build.ps1)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./bin/build.ps1
+
+      - name: Test
+        run: bundle exec rake test
+
+      # Install the packaged .gem like a user would, then use it from outside the repo.
+      - name: Install packaged gem and smoke test
+        shell: bash
+        run: |
+          gem install --local pkg/palettegen-*.gem
+          cd "$RUNNER_TEMP"
+          ruby -e '
+            require "palettegen"
+            hex = Palettegen.hex(ARGV[0], colors: 3)
+            abort "unexpected palette #{hex.inspect}" unless hex == ["#00ff00"]
+            puts "palettegen #{Palettegen::VERSION}: #{hex.inspect}, webp=#{Palettegen.webp_supported?}"
+          ' "$GITHUB_WORKSPACE/test/fixtures/green.png"
+
+  sanitize:
+    name: AddressSanitizer + UBSan fuzz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      - name: Compile with sanitizers
+        run: PALETTEGEN_SANITIZE=1 bundle exec rake compile
+
+      - name: Test (with 5000 fuzz iterations)
+        env:
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          PALETTEGEN_FUZZ_ITERATIONS: "5000"
+        run: LD_PRELOAD="$(gcc -print-file-name=libasan.so)" bundle exec ruby -Ilib -Itest test/test_palettegen.rb
