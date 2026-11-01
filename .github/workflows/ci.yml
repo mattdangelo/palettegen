@@ -19,7 +19,7 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
         ruby: ["3.0", "3.4", "4.0"]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: ruby/setup-ruby@v1
         with:
@@ -61,7 +61,7 @@ jobs:
     name: Fuzz (libFuzzer + ASan + UBSan)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # ASan's shadow memory layout breaks with the 32-bit mmap randomisation
       # used by recent Ubuntu runner kernels.
