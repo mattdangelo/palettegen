@@ -7,3 +7,4 @@
 /lib/palettegen/*.so
 /lib/palettegen/*.bundle
 /Gemfile.lock
+/.idea/

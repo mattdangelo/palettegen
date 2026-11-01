@@ -1,0 +1,7 @@
+# Normalise line endings in the repo; shell scripts must stay LF even on Windows
+# checkouts or bash can't run them.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.png binary
+*.jpg binary
+*.gif binary
