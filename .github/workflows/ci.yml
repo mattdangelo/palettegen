@@ -69,9 +69,15 @@ jobs:
       - name: Compile with sanitizers
         run: PALETTEGEN_SANITIZE=1 bundle exec rake compile
 
+      # ASan's shadow memory layout breaks with the 32-bit mmap randomisation
+      # used by recent Ubuntu runner kernels.
+      - name: Reduce ASLR entropy for ASan
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
       - name: Test (with 5000 fuzz iterations)
         env:
-          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
+          # Ruby manages its own thread stacks, which ASan's fake stacks don't cope with.
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1:detect_stack_use_after_return=0
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
           PALETTEGEN_FUZZ_ITERATIONS: "5000"
         run: LD_PRELOAD="$(gcc -print-file-name=libasan.so)" bundle exec ruby -Ilib -Itest test/test_palettegen.rb
