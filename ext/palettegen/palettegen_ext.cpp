@@ -9,6 +9,7 @@
 #include <ruby/encoding.h>
 #include <ruby/thread.h>
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <new>
@@ -18,13 +19,15 @@
 
 namespace {
 
-VALUE mPalettegen, mNative, eError, eDecodeError;
+VALUE mPalettegen, mNative, eError, eDecodeError, eTooLargeError;
 
-enum class Failure { None, Error, Decode, NoMemory };
+enum class Failure { None, Error, Decode, TooLarge, Cancelled, NoMemory };
 
 struct ExtractCall {
     std::string blob;
+    std::uint64_t max_pixels = palettegen::kDefaultMaxPixels;
     palettegen::Options opts;
+    std::atomic<bool> cancel{false};
     std::vector<palettegen::Swatch> result;
     Failure failure = Failure::None;
     std::string message;
@@ -49,6 +52,11 @@ template <class Fn>
 void capture_failures(Failure& failure, std::string& message, Fn&& fn) {
     try {
         fn();
+    } catch (const palettegen::TooLargeError& e) {
+        failure = Failure::TooLarge;
+        message = e.what();
+    } catch (const palettegen::Cancelled&) {
+        failure = Failure::Cancelled;
     } catch (const palettegen::DecodeError& e) {
         failure = Failure::Decode;
         message = e.what();
@@ -71,7 +79,7 @@ void* extract_without_gvl(void* arg) {
     auto* call = static_cast<ExtractCall*>(arg);
     capture_failures(call->failure, call->message, [call] {
         const auto* bytes = reinterpret_cast<const std::uint8_t*>(call->blob.data());
-        const palettegen::Image image = palettegen::decode(bytes, call->blob.size());
+        const palettegen::Image image = palettegen::decode(bytes, call->blob.size(), call->max_pixels);
         call->blob.clear();
         call->blob.shrink_to_fit();
         call->result = palettegen::extract(image, call->opts);
@@ -79,20 +87,27 @@ void* extract_without_gvl(void* arg) {
     return nullptr;
 }
 
+// Unblocking function: Ruby calls this (from another thread) when the calling
+// thread is interrupted, e.g. by Timeout, Thread#raise/kill or Ctrl-C.
+void cancel_extract(void* arg) { static_cast<ExtractCall*>(arg)->cancel.store(true, std::memory_order_relaxed); }
+
 // Raise from a plain C buffer so no std::string is alive across the longjmp.
 [[noreturn]] void raise_failure(Failure failure, const std::string& message) {
     if (failure == Failure::NoMemory) rb_memerror();
     char buf[512];
     std::snprintf(buf, sizeof buf, "%s", message.c_str());
-    rb_raise(failure == Failure::Decode ? eDecodeError : eError, "%s", buf);
+    VALUE klass = failure == Failure::TooLarge ? eTooLargeError : failure == Failure::Decode ? eDecodeError : eError;
+    rb_raise(klass, "%s", buf);
 }
 
-// Native.extract(blob, colors, space, seed, max_samples, alpha_threshold)
+// Native.extract(blob, colors, space, seed, max_samples, alpha_threshold, max_pixels)
 //   space: 0 = Lab, 1 = RGB
 //   => [[r, g, b, share], ...] sorted by share descending
 VALUE native_extract(VALUE, VALUE blob, VALUE colors, VALUE space, VALUE seed, VALUE max_samples,
-                     VALUE alpha_threshold) {
+                     VALUE alpha_threshold, VALUE max_pixels) {
     StringValue(blob);
+    const long long pixel_limit = NUM2LL(max_pixels);
+    if (pixel_limit < 1) rb_raise(rb_eArgError, "max_pixels must be positive");
     const int n_colors = NUM2INT(colors);
     const int space_id = NUM2INT(space);
     const unsigned long long seed_value = NUM2ULL(seed);
@@ -121,9 +136,15 @@ VALUE native_extract(VALUE, VALUE blob, VALUE colors, VALUE space, VALUE seed, V
     call->opts.seed = seed_value;
     call->opts.max_samples = static_cast<std::size_t>(samples);
     call->opts.alpha_threshold = static_cast<std::uint8_t>(alpha);
+    call->opts.cancel = &call->cancel;
+    call->max_pixels = static_cast<std::uint64_t>(pixel_limit);
 
-    rb_thread_call_without_gvl(extract_without_gvl, call, nullptr, nullptr);
+    rb_thread_call_without_gvl(extract_without_gvl, call, cancel_extract, call);
 
+    if (call->failure == Failure::Cancelled) {
+        rb_thread_check_ints();  // raises the pending interrupt (Timeout::Error, Interrupt, ...)
+        rb_raise(eError, "extraction was cancelled");
+    }
     if (call->failure != Failure::None) raise_failure(call->failure, call->message);
 
     VALUE out = rb_ary_new_capa(static_cast<long>(call->result.size()));
@@ -203,12 +224,17 @@ extern "C" void Init_palettegen() {
     eDecodeError = rb_const_defined(mPalettegen, rb_intern("DecodeError"))
                        ? rb_const_get(mPalettegen, rb_intern("DecodeError"))
                        : rb_define_class_under(mPalettegen, "DecodeError", eError);
+    eTooLargeError = rb_const_defined(mPalettegen, rb_intern("ImageTooLargeError"))
+                         ? rb_const_get(mPalettegen, rb_intern("ImageTooLargeError"))
+                         : rb_define_class_under(mPalettegen, "ImageTooLargeError", eDecodeError);
     rb_global_variable(&eError);
     rb_global_variable(&eDecodeError);
+    rb_global_variable(&eTooLargeError);
 
-    rb_define_singleton_method(mNative, "extract", RUBY_METHOD_FUNC(native_extract), 6);
+    rb_define_singleton_method(mNative, "extract", RUBY_METHOD_FUNC(native_extract), 7);
     rb_define_singleton_method(mNative, "encode", RUBY_METHOD_FUNC(native_encode), 4);
     rb_define_singleton_method(mNative, "webp_supported?", RUBY_METHOD_FUNC(native_webp_supported), 0);
     rb_define_const(mNative, "MIN_COLORS", INT2FIX(palettegen::kMinColors));
     rb_define_const(mNative, "MAX_COLORS", INT2FIX(palettegen::kMaxColors));
+    rb_define_const(mNative, "DEFAULT_MAX_PIXELS", ULL2NUM(palettegen::kDefaultMaxPixels));
 }

@@ -122,12 +122,12 @@ double uniform01(std::mt19937_64& rng) {
 
 std::vector<Point> collect_points(const Image& img, const Options& opts, std::mt19937_64& rng) {
     const std::size_t total = static_cast<std::size_t>(img.width) * img.height;
-    if (img.rgba.size() < total * 4) throw Error("image buffer is smaller than its dimensions");
+    if (!img.data()) throw Error("image has no pixel data");
 
     std::unordered_map<std::uint32_t, std::uint32_t> hist;
 
     auto add = [&](std::size_t idx) {
-        const std::uint8_t* p = &img.rgba[idx * 4];
+        const std::uint8_t* p = img.data() + idx * 4;
         if (p[3] < opts.alpha_threshold) return;
         ++hist[(std::uint32_t(p[0]) << 16) | (std::uint32_t(p[1]) << 8) | p[2]];
     };
@@ -215,7 +215,12 @@ struct Clustering {
     double inertia = std::numeric_limits<double>::max();
 };
 
-Clustering lloyd(const std::vector<Point>& pts, std::vector<Vec3> centroids, int max_iterations) {
+void check_cancel(const Options& opts) {
+    if (opts.cancel && opts.cancel->load(std::memory_order_relaxed)) throw Cancelled("cancelled");
+}
+
+Clustering lloyd(const std::vector<Point>& pts, std::vector<Vec3> centroids, int max_iterations,
+                 const Options& opts) {
     const std::size_t k = centroids.size();
     std::vector<int> assign(pts.size(), -1);
     std::vector<double> d2(pts.size(), 0.0);
@@ -223,6 +228,7 @@ Clustering lloyd(const std::vector<Point>& pts, std::vector<Vec3> centroids, int
 
     Clustering result;
     for (int iter = 0;; ++iter) {
+        check_cancel(opts);
         // Assignment step.
         bool changed = false;
         double inertia = 0.0;
@@ -323,7 +329,8 @@ std::vector<Swatch> extract(const Image& image, const Options& opts) {
     } else {
         Clustering best;
         for (int a = 0; a < opts.attempts; ++a) {
-            Clustering c = lloyd(pts, seed_centroids(pts, opts.colors, rng), opts.max_iterations);
+            check_cancel(opts);
+            Clustering c = lloyd(pts, seed_centroids(pts, opts.colors, rng), opts.max_iterations, opts);
             if (c.inertia < best.inertia) best = std::move(c);
         }
         for (std::size_t c = 0; c < best.centroids.size(); ++c) {

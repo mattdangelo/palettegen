@@ -3,6 +3,7 @@
 $LOAD_PATH.unshift File.expand_path("../lib", __dir__)
 require "palettegen"
 require "minitest/autorun"
+require "minitest/mock"
 require "zlib"
 
 # Minimal pure-Ruby encoders so tests can build exact fixtures in every format

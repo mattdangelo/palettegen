@@ -39,6 +39,8 @@ Palettegen.from_blob(params[:image].read, colors: 4).hex
 | `seed`            | `0`     | Results are deterministic: the same image and seed always give the same palette. |
 | `max_samples`     | `250_000` | Large images are sampled down to this many pixels. |
 | `alpha_threshold` | `128`   | Pixels more transparent than this (0..255) are ignored. |
+| `max_bytes`       | 50 MB   | Input larger than this is rejected (`from_file` checks the file size before reading it). |
+| `max_pixels`      | `50_000_000` | Images whose width × height exceed this are rejected from the header, before any pixels are decoded. |
 
 Palette image options: `square:` (pixels per swatch, default 100) and
 `quality:` (JPEG, default 95).
@@ -46,23 +48,49 @@ Palette image options: `square:` (pixels per swatch, default 100) and
 ### Errors
 
 * `ArgumentError`: invalid options (e.g. `colors: 12`)
+* `Palettegen::ImageTooLargeError`: input over `max_bytes` or `max_pixels` (a subclass of `DecodeError`)
 * `Palettegen::DecodeError`: corrupt or unsupported image data
 * `Palettegen::Error`: other failures (e.g. a fully transparent image)
 
+All of these inherit from `Palettegen::Error` except `ArgumentError`.
+
+### Untrusted input
+
+The defaults are meant to be safe for user uploads:
+
+* Oversized images are rejected from their header, so a tiny file that claims to
+  be 500000 × 500000 never gets decoded. Peak memory per call is roughly
+  `max_bytes + 4 × max_pixels` (about 250 MB with the defaults); lower the limits
+  if many extractions run at once on a small server.
+* Only the JPEG, PNG, GIF and BMP decoders (and WebP, if enabled) are compiled in.
+* Clustering checks for interrupts, so `Timeout.timeout`, `Thread#raise` and
+  Ctrl-C stop a long extraction promptly.
+
+```ruby
+begin
+  Palettegen.from_blob(upload.read, max_pixels: 20_000_000).hex
+rescue Palettegen::ImageTooLargeError
+  head :payload_too_large
+rescue Palettegen::Error
+  head :unprocessable_entity
+end
+```
+
 ## Supported formats
 
-JPEG, PNG (including 16-bit and transparency), GIF (first frame), BMP, TGA,
-PSD (composited image), HDR, and PNM/PPM. These are decoded by the vendored
-[stb_image](https://github.com/nothings/stb), so there are no system dependencies.
+JPEG, PNG (including 16-bit and transparency), GIF (first frame) and BMP. These
+are decoded by the vendored [stb_image](https://github.com/nothings/stb), so there
+are no system dependencies.
 
 **WebP** is enabled automatically if libwebp's headers are present when the gem
 is installed (`apt install libwebp-dev`, `brew install webp`,
 `pacman -S mingw-w64-ucrt-x86_64-libwebp`). Check with `Palettegen.webp_supported?`.
 
-TIFF, HEIC and AVIF aren't supported directly. Convert them first (e.g. with
+TIFF, HEIC, AVIF, TGA, PSD and HDR aren't supported directly. Convert them first (e.g. with
 `ruby-vips`) and pass the PNG bytes to `from_blob`.
 
-Images over 100 megapixels are rejected to protect servers from decompression bombs.
+Images over `max_pixels` (50 megapixels by default) are rejected to protect
+servers from decompression bombs.
 
 ## How it works
 
@@ -75,7 +103,8 @@ Images over 100 megapixels are rejected to protect servers from decompression bo
    clusters are re-seeded instead of left dead.
 5. Centroids are converted back to sRGB and sorted by how much of the image they cover.
 
-Clustering runs without Ruby's GVL, so it runs in parallel under Puma or Sidekiq threads.
+Clustering runs without Ruby's GVL, so it runs in parallel under Puma or Sidekiq
+threads, and it can be interrupted (e.g. by `Timeout`).
 
 ## Development
 

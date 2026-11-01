@@ -2,6 +2,7 @@
 
 require_relative "test_helper"
 require "tmpdir"
+require "timeout"
 
 class TestPalettegen < Minitest::Test
   include ImageFixtures
@@ -105,10 +106,17 @@ class TestPalettegen < Minitest::Test
 
   def test_input_formats
     w, h, px = stripes([RED, BLUE], width_per: 2, height: 2)
-    { png: png(w, h, px), bmp: bmp(w, h, px), tga: tga(w, h, px), ppm: ppm(w, h, px), gif: gif(w, h, px) }
-      .each do |fmt, blob|
-        assert_equal %w[#143cc8 #ed1c24], extract(blob, colors: 2).hex.sort, "format #{fmt}"
-      end
+    { png: png(w, h, px), bmp: bmp(w, h, px), gif: gif(w, h, px) }.each do |fmt, blob|
+      assert_equal %w[#143cc8 #ed1c24], extract(blob, colors: 2).hex.sort, "format #{fmt}"
+    end
+  end
+
+  def test_formats_outside_the_allowlist_are_rejected
+    # TGA/PNM/PSD/HDR decoders are compiled out to shrink the attack surface.
+    w, h, px = stripes([RED, BLUE], width_per: 2, height: 2)
+    { tga: tga(w, h, px), ppm: ppm(w, h, px) }.each do |fmt, blob|
+      assert_raises(Palettegen::DecodeError, "format #{fmt}") { extract(blob, colors: 2) }
+    end
   end
 
   def test_jpeg_input_round_trip
@@ -133,6 +141,104 @@ class TestPalettegen < Minitest::Test
     skip "built with WebP" if Palettegen.webp_supported?
     error = assert_raises(Palettegen::DecodeError) { extract("RIFF\x00\x00\x00\x00WEBPVP8 ".b, colors: 2) }
     assert_match(/WebP/, error.message)
+  end
+
+  # --- Size limits ----------------------------------------------------------
+
+  def test_huge_declared_dimensions_are_rejected_before_decoding
+    # Headers only: nothing is decoded, so this must be instant.
+    [[500_000, 500_000], [65_536, 65_537], [40_000, 40_000]].each do |w, h|
+      error = assert_raises(Palettegen::ImageTooLargeError) { extract(png_header(w, h)) }
+      assert_match(/too large/, error.message)
+    end
+    assert_raises(Palettegen::ImageTooLargeError) { extract(bmp_header(100_000, -100_000)) }
+  end
+
+  def test_default_pixel_limit_is_50_megapixels
+    assert_equal 50_000_000, Palettegen::DEFAULT_MAX_PIXELS
+    assert_raises(Palettegen::ImageTooLargeError) { extract(png_header(10_000, 5_001)) }
+    # 10000x5000 is exactly at the limit: it gets past the size check and fails on the (missing) pixel data.
+    error = assert_raises(Palettegen::DecodeError) { extract(png_header(10_000, 5_000)) }
+    refute_kind_of Palettegen::ImageTooLargeError, error
+  end
+
+  def test_max_pixels_option
+    blob = png(*stripes([RED, BLUE], width_per: 5, height: 10)) # 10x10
+    assert_raises(Palettegen::ImageTooLargeError) { extract(blob, max_pixels: 99) }
+    assert_equal 2, extract(blob, max_pixels: 100).size
+    assert_raises(Palettegen::ImageTooLargeError) { extract(bmp(10, 10, [RED] * 100), max_pixels: 99) }
+    assert_raises(Palettegen::ImageTooLargeError) { extract(gif(10, 10, [RED] * 100), max_pixels: 99) }
+    jpeg = Palettegen::Palette.new([Palettegen::Color.new(*RED, 1.0)]).to_jpeg(square: 10)
+    assert_raises(Palettegen::ImageTooLargeError) { extract(jpeg, max_pixels: 99) }
+  end
+
+  def test_max_bytes_option
+    blob = png(*stripes([RED, BLUE]))
+    error = assert_raises(Palettegen::ImageTooLargeError) { extract(blob, max_bytes: blob.bytesize - 1) }
+    assert_match(/#{blob.bytesize} bytes/, error.message)
+    assert extract(blob, max_bytes: blob.bytesize)
+    assert_equal 50 * 1024 * 1024, Palettegen::DEFAULT_MAX_BYTES
+  end
+
+  def test_from_file_checks_size_before_reading
+    size = File.size(fixture("apple.png"))
+    File.stub(:binread, ->(*) { flunk "file was read" }) do
+      assert_raises(Palettegen::ImageTooLargeError) do
+        Palettegen.from_file(fixture("apple.png"), max_bytes: size - 1)
+      end
+    end
+  end
+
+  def test_too_large_error_is_a_decode_error
+    assert_operator Palettegen::ImageTooLargeError, :<, Palettegen::DecodeError
+    assert_operator Palettegen::DecodeError, :<, Palettegen::Error
+  end
+
+  def test_limit_option_validation
+    blob = png(*stripes([RED, BLUE]))
+    [0, -1, "5", nil, 1.5].each do |bad|
+      assert_raises(ArgumentError, "max_pixels: #{bad.inspect}") { extract(blob, max_pixels: bad) }
+      assert_raises(ArgumentError, "max_bytes: #{bad.inspect}") { extract(blob, max_bytes: bad) }
+    end
+  end
+
+  # --- Robustness -----------------------------------------------------------
+
+  # Random corruption of valid images must only ever raise Palettegen::Error
+  # (never crash). Most useful in CI's AddressSanitizer job.
+  def test_corrupted_inputs_fail_cleanly
+    rng = Random.new(1234)
+    w, h, px = stripes([RED, WHITE, BLUE, GREEN], width_per: 3, height: 3)
+    jpeg = Palettegen::Palette.new([RED, BLUE, GREEN].map { |c| Palettegen::Color.new(*c, 0.3) }).to_jpeg(square: 8)
+    seeds = [png(w, h, px), bmp(w, h, px), gif(4, 2, [RED, BLUE] * 4), jpeg, File.binread(fixture("apple.png"))]
+    iterations = Integer(ENV.fetch("PALETTEGEN_FUZZ_ITERATIONS", 300))
+    iterations.times do |i|
+      blob = seeds[i % seeds.size].dup
+      case rng.rand(3)
+      when 0 then rng.rand(1..8).times { blob.setbyte(rng.rand(blob.bytesize), rng.rand(256)) }
+      when 1 then blob = blob[0, rng.rand(blob.bytesize)]
+      else blob.insert(rng.rand(blob.bytesize), rng.bytes(rng.rand(1..16)))
+      end
+      begin
+        extract(blob, colors: 3)
+      rescue Palettegen::Error
+        # expected for most mutations
+      end
+    end
+  end
+
+  def test_long_extraction_can_be_interrupted
+    rng = Random.new(7)
+    blob = png(400, 400, Array.new(400 * 400) { [rng.rand(256), rng.rand(256), rng.rand(256)] })
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    extract(blob, colors: 10)
+    full = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+    skip "extraction too fast to measure interruption (#{full.round(3)}s)" if full < 0.3
+
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    assert_raises(Timeout::Error) { Timeout.timeout(full / 10) { extract(blob, colors: 10) } }
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+    assert_operator elapsed, :<, full * 0.6, "took #{elapsed.round(3)}s to interrupt a #{full.round(3)}s extraction"
   end
 
   # --- Output ---------------------------------------------------------------
@@ -203,6 +309,17 @@ class TestPalettegen < Minitest::Test
   end
 
   private
+
+  # A PNG that declares w x h but has no pixel data.
+  def png_header(width, height)
+    ihdr = [width, height, 8, 6, 0, 0, 0].pack("NNCCCCC")
+    [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A].pack("C*") + [13].pack("N") + "IHDR" + ihdr + [Zlib.crc32("IHDR#{ihdr}")].pack("N")
+  end
+
+  # A BMP header declaring w x h (h negative = top-down) with no pixel data.
+  def bmp_header(width, height)
+    ["BM", 54, 0, 0, 54].pack("a2VvvV") + [40, width, height, 1, 24, 0, 0, 2835, 2835, 0, 0].pack("VVVvvVVVVVV")
+  end
 
   def jpeg_dimensions(data)
     i = 2

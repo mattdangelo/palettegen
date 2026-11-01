@@ -11,6 +11,14 @@ else
   $CXXFLAGS << " -std=c++17 -O2"
 end
 
+# CI only: build with AddressSanitizer + UBSan to catch memory errors in the
+# decoders (run Ruby with LD_PRELOAD=$(gcc -print-file-name=libasan.so)).
+if ENV["PALETTEGEN_SANITIZE"] == "1"
+  $CXXFLAGS << " -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined -g -O1"
+  $LDFLAGS << " -fsanitize=address,undefined"
+  message "palettegen: building with AddressSanitizer and UBSan\n"
+end
+
 have_func("rb_ext_ractor_safe", "ruby.h")
 
 # Optional WebP support. Opt out with: gem install palettegen -- --without-webp
