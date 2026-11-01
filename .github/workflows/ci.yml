@@ -80,4 +80,8 @@ jobs:
           ASAN_OPTIONS: detect_leaks=0:abort_on_error=1:detect_stack_use_after_return=0
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
           PALETTEGEN_FUZZ_ITERATIONS: "5000"
-        run: LD_PRELOAD="$(gcc -print-file-name=libasan.so)" bundle exec ruby -Ilib -Itest test/test_palettegen.rb
+        # libstdc++ is preloaded too: Ruby isn't a C++ program, so otherwise ASan
+        # can't find the real __cxa_throw to intercept when the extension throws.
+        run: |
+          export LD_PRELOAD="$(gcc -print-file-name=libasan.so) $(gcc -print-file-name=libstdc++.so)"
+          bundle exec ruby -Ilib -Itest test/test_palettegen.rb
