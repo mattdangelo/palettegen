@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Build the palettegen gem: install dependencies, compile the native C++
+# extension, and package the .gem into pkg/.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+bundle install
+bundle exec rake compile   # build the native extension (ext/palettegen)
+bundle exec rake build     # package pkg/palettegen-<version>.gem
+
+echo
+echo "Built: $(ls -t pkg/*.gem | head -n1)"
